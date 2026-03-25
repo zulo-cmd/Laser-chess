@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Laser Chess</title>
+    <style>
+        body { font-family: sans-serif; background-color: #1a1a1a; color: white; display: flex; flex-direction: column; align-items: center; padding: 20px; margin: 0; }
+        #game-container { position: relative; border: 5px solid #444; box-shadow: 0 0 30px rgba(0,0,0,0.5); margin-top: 10px; }
+        #board { display: grid; grid-template-columns: repeat(10, 60px); grid-template-rows: repeat(8, 60px); background-color: #222; }
+        .cell { width: 60px; height: 60px; border: 1px solid #333; box-sizing: border-box; position: relative; cursor: pointer; }
+        
+        .hatched-red { background: repeating-linear-gradient(45deg, #222, #222 5px, #551111 5px, #551111 10px); }
+        .hatched-cyan { background: repeating-linear-gradient(45deg, #222, #222 5px, #114444 5px, #114444 10px); }
+        
+        .selected { background-color: rgba(255, 255, 0, 0.2) !important; box-shadow: inset 0 0 15px yellow; }
+        
+        .piece { transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); width: 100%; height: 100%; }
+
+        @keyframes explode {
+            0% { transform: scale(1); opacity: 1; filter: brightness(1); }
+            50% { transform: scale(1.4); opacity: 1; filter: brightness(5); }
+            100% { transform: scale(0); opacity: 0; }
+        }
+        .destroying { animation: explode 0.6s forwards; }
+
+        #laser-canvas { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 10; }
+        
+        #controls { margin-top: 20px; display: flex; gap: 15px; align-items: center; background: #333; padding: 15px; border-radius: 12px; border: 1px solid #555; }
+        button { padding: 12px 24px; font-weight: bold; cursor: pointer; border-radius: 6px; border: none; background: #555; color: white; transition: 0.2s; text-transform: uppercase; letter-spacing: 1px; }
+        button:hover:not(:disabled) { background: #777; transform: translateY(-2px); }
+        button:active:not(:disabled) { transform: translateY(0); }
+        #btn-confirm { background-color: #2e7d32; box-shadow: 0 4px #1b5e20; }
+        #btn-undo { background-color: #c62828; box-shadow: 0 4px #8e0000; }
+        button:disabled { opacity: 0.2; cursor: not-allowed; transform: none !important; box-shadow: none !important; }
+        
+        .status-bar { width: 600px; display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 22px; font-weight: bold; letter-spacing: 2px; }
+    </style>
+</head>
+<body>
+
+<div class="status-bar">
+    <span style="color: #cc4444;">RED</span>
+    <span id="status-text" style="color: #ccc;">TURN: CYAN</span>
+    <span style="color: #00aaaa;">CYAN</span>
+</div>
+
+<div id="game-container">
+    <div id="board"></div>
+    <canvas id="laser-canvas" width="600" height="480"></canvas>
+</div>
+
+<div id="controls">
+    <button id="btn-rot-left">↶ Rotate</button>
+    <button id="btn-rot-right">↷ Rotate</button>
+    <button id="btn-undo" disabled>Undo</button>
+    <button id="btn-confirm" disabled>Confirm</button>
+</div>
+
+<script>
+// --- AUDIO ---
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playSound(type) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    if (type === 'click') {
+        osc.frequency.setValueAtTime(800, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    } else if (type === 'laser') {
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(500, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(100, audioCtx.currentTime + 0.8);
+        gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.8);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.8);
+    } else if (type === 'hit') {
+        osc.type = 'square';
+        osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0, audioCtx.currentTime + 0.4);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.4);
+    }
+}
+
+// --- LOGIC ---
+const ROWS = 8, COLS = 10;
+let currentPlayer = 1;
+let board = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
+let originalBoard = null;
+let selectedPos = null;
+let hasDoneAction = false;
+
+function pos(x, y) { return { r: 8 - y, c: x - 1 }; }
+
+const initialSetup = [
+    {...pos(1,8), p:2, t:'cannon', rot:2}, {...pos(5,8), p:2, t:'shield', rot:2},
+    {...pos(6,8), p:2, t:'king',   rot:2}, {...pos(7,8), p:2, t:'shield', rot:2},
+    {...pos(8,8), p:2, t:'single', rot:3}, {...pos(3,7), p:2, t:'single', rot:0},
+    {...pos(1,5), p:2, t:'single', rot:2}, {...pos(5,5), p:2, t:'double', rot:0},
+    {...pos(6,5), p:2, t:'double', rot:1}, {...pos(8,5), p:2, t:'single', rot:3},
+    {...pos(1,4), p:2, t:'single', rot:3}, {...pos(8,4), p:2, t:'single', rot:2},
+    {...pos(7,3), p:2, t:'single', rot:3},
+    {...pos(10,1), p:1, t:'cannon', rot:0}, {...pos(4,1), p:1, t:'shield', rot:0},
+    {...pos(5,1), p:1, t:'king',   rot:0}, {...pos(6,1), p:1, t:'shield', rot:0},
+    {...pos(3,1), p:1, t:'single', rot:1}, {...pos(8,2), p:1, t:'single', rot:2},
+    {...pos(10,4), p:1, t:'single', rot:0}, {...pos(3,4), p:1, t:'single', rot:1},
+    {...pos(5,4), p:1, t:'double', rot:1}, {...pos(6,4), p:1, t:'double', rot:0},
+    {...pos(10,5), p:1, t:'single', rot:1}, {...pos(3,5), p:1, t:'single', rot:0},
+    {...pos(4,6), p:1, t:'single', rot:1}
+];
+
+initialSetup.forEach(s => board[s.r][s.c] = { player: s.p, type: s.t, rot: s.rot });
+
+const boardEl = document.getElementById('board');
+const canvas = document.getElementById('laser-canvas');
+const ctx = canvas.getContext('2d');
+const confirmBtn = document.getElementById('btn-confirm');
+const undoBtn = document.getElementById('btn-undo');
+
+function render() {
+    boardEl.innerHTML = '';
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const cell = document.createElement('div');
+            cell.className = 'cell';
+            if (c === 0 || (r===0 && c===8) || (r===7 && c===8)) cell.classList.add('hatched-red');
+            if (c === 9 || (r===0 && c===1) || (r===7 && c===1)) cell.classList.add('hatched-cyan');
+            if (selectedPos && selectedPos.r === r && selectedPos.c === c) cell.classList.add('selected');
+            const p = board[r][c];
+            if (p) {
+                const pieceDiv = document.createElement('div');
+                pieceDiv.className = 'piece';
+                pieceDiv.id = `piece-${r}-${c}`;
+                pieceDiv.innerHTML = getSVG(p);
+                cell.appendChild(pieceDiv);
+            }
+            cell.onclick = () => handleClick(r, c);
+            boardEl.appendChild(cell);
+        }
+    }
+}
+
+function getSVG(p) {
+    const color = p.player === 1 ? '#00aaaa' : '#cc4444';
+    const glow = p.player === 1 ? '0 0 5px #00aaaa' : '0 0 5px #cc4444';
+    let content = '';
+    if (p.type==='cannon') {
+        content = `<circle cx="30" cy="30" r="22" fill="${color}" stroke="#000"/><rect x="25" y="5" width="10" height="25" fill="#ddd" rx="2"/>`;
+    } else if (p.type==='king') {
+        content = `<rect x="15" y="15" width="30" height="30" fill="${color}" stroke="#000" rx="3"/><path d="M22,22 L38,38 M38,22 L22,38" stroke="#fff" stroke-width="4" stroke-linecap="round"/>`;
+    } else if (p.type==='shield') {
+        content = `<rect x="10" y="10" width="40" height="40" fill="${color}" stroke="#000" rx="2"/><rect x="10" y="10" width="40" height="10" fill="#ddd" rx="1"/>`;
+    } else if (p.type==='single') {
+        content = `<polygon points="10,10 50,10 50,50" fill="${color}" stroke="#000"/><line x1="10" y1="10" x2="50" y2="50" stroke="#eee" stroke-width="4"/>`;
+    } else if (p.type==='double') {
+        content = `<rect x="26" y="5" width="8" height="50" transform="rotate(-45 30 30)" fill="${color}" fill-opacity="0.8" stroke="#eee" stroke-width="1"/>`;
+    }
+    return `<svg viewBox="0 0 60 60" style="transform: rotate(${p.rot * 90}deg); filter: drop-shadow(${glow});">${content}</svg>`;
+}
+
+function handleClick(r, c) {
+    if (hasDoneAction) return;
+    const piece = board[r][c];
+    if (selectedPos) {
+        if (Math.abs(selectedPos.r - r) <= 1 && Math.abs(selectedPos.c - c) <= 1 && !piece) {
+            const p = board[selectedPos.r][selectedPos.c];
+            if (p.type === 'cannon') return;
+            if ((c===0 || (r===0 && c===8) || (r===7 && c===8)) && p.player !== 2) return;
+            if ((c===9 || (r===0 && c===1) || (r===7 && c===1)) && p.player !== 1) return;
+            playSound('click'); saveState();
+            board[r][c] = {...p}; board[selectedPos.r][selectedPos.c] = null;
+            finishAction(); return;
+        }
+    }
+    if (piece && piece.player === currentPlayer) { playSound('click'); selectedPos = {r, c}; render(); }
+}
+
+function rotate(dir) {
+    if (!selectedPos || hasDoneAction) return;
+    const p = board[selectedPos.r][selectedPos.c];
+    if (p.type === 'king') return;
+    if (p.type === 'cannon') {
+        let nr = (p.rot + dir + 4) % 4;
+        if ((p.player === 1 && nr === 1) || (p.player === 2 && nr === 3)) return;
+    }
+    playSound('click'); saveState();
+    p.rot = (p.rot + dir + 4) % 4;
+    finishAction();
+}
+
+function saveState() { originalBoard = JSON.parse(JSON.stringify(board)); }
+function finishAction() { hasDoneAction = true; selectedPos = null; confirmBtn.disabled = false; undoBtn.disabled = false; render(); }
+
+undoBtn.onclick = () => { board = JSON.parse(JSON.stringify(originalBoard)); hasDoneAction = false; confirmBtn.disabled = true; undoBtn.disabled = true; render(); };
+document.getElementById('btn-rot-left').onclick = () => rotate(-1);
+document.getElementById('btn-rot-right').onclick = () => rotate(1);
+
+confirmBtn.onclick = () => { confirmBtn.disabled = true; undoBtn.disabled = true; hasDoneAction = false; fireLaser(); };
+
+function fireLaser() {
+    playSound('laser');
+    let tykki = null;
+    for(let r=0; r<8; r++) for(let c=0; c<10; c++) 
+        if(board[r][c]?.type==='cannon' && board[r][c].player===currentPlayer) tykki={r,c,rot:board[r][c].rot};
+    
+    let x=tykki.c, y=tykki.r, dir=tykki.rot;
+    ctx.clearRect(0,0,600,480);
+    ctx.shadowBlur = 10; ctx.shadowColor = currentPlayer===1 ? '#008888' : '#aa3333';
+    ctx.strokeStyle = '#eee'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(x*60+30, y*60+30);
+
+    let hit = null;
+    for(let i=0; i<60; i++) {
+        if (dir===0) y--; else if (dir===1) x++; else if (dir===2) y++; else if (dir===3) x--;
+        ctx.lineTo(x*60+30, y*60+30);
+        if (x<0 || x>=10 || y<0 || y>=8) break;
+        let p = board[y][x];
+        if (p) {
+            let res = resolve(p, dir);
+            if (res==='stop') break;
+            if (res==='destroy') { hit={r:y,c:x}; break; }
+            if (res==='win') { 
+                ctx.stroke();
+                setTimeout(() => { alert("KING DESTROYED! Game Over."); location.reload(); }, 500);
+                return; 
+            }
+            dir = res;
+        }
+    }
+    ctx.stroke();
+
+    setTimeout(() => {
+        if(hit) {
+            playSound('hit');
+            const target = document.getElementById(`piece-${hit.r}-${hit.c}`);
+            if(target) target.classList.add('destroying');
+            setTimeout(() => { board[hit.r][hit.c] = null; finalizeTurn(); }, 600);
+        } else { finalizeTurn(); }
+    }, 800);
+}
+
+function finalizeTurn() {
+    ctx.clearRect(0,0,600,480);
+    currentPlayer = currentPlayer===1 ? 2 : 1;
+    document.getElementById('status-text').innerText = "TURN: " + (currentPlayer===1 ? "CYAN" : "RED");
+    render();
+}
+
+function resolve(p, d) {
+    if (p.type==='king') return 'win';
+    if (p.type==='cannon') return 'stop';
+    if (p.type==='shield') return (d===(p.rot+2)%4) ? 'stop' : 'destroy';
+    if (p.type==='double') {
+        if (p.rot%2===0) { if(d===0)return 3; if(d===2)return 1; if(d===1)return 2; if(d===3)return 0; }
+        else { if(d===0)return 1; if(d===2)return 3; if(d===1)return 0; if(d===3)return 2; }
+    }
+    if (p.type==='single') {
+        const r = p.rot;
+        if(r===0 && d===0) return 3; if(r===0 && d===1) return 2;
+        if(r===1 && d===1) return 0; if(r===1 && d===2) return 3;
+        if(r===2 && d===2) return 1; if(r===2 && d===3) return 0;
+        if(r===3 && d===3) return 2; if(r===3 && d===0) return 1;
+        return 'destroy';
+    }
+}
+render();
+</script>
+</body>
+</html>
