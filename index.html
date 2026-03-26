@@ -71,7 +71,7 @@ const firebaseConfig = {
     storageBucket: "laserchess-online.firebasestorage.app",
     messagingSenderId: "416512043795",
     appId: "1:416512043795:web:5402777263e2c89fbb08e6",
-    databaseURL: "https://laserchess-online-default-rtdb.europe-west1.firebasedatabase.app" // Varmistettu Eurooppa-URL
+    databaseURL: "https://laserchess-online-default-rtdb.europe-west1.firebasedatabase.app"
 };
 
 firebase.initializeApp(firebaseConfig);
@@ -96,21 +96,18 @@ let board = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
 let originalBoard = null;
 let selectedPos = null;
 let hasDoneAction = false;
-let gameActive = false; // TÄMÄ ON UUTTA: Kertoo onko molemmat pelaajat paikalla
+let gameActive = false; 
 
 function selectPlayer(id) {
     myPlayerId = id;
     document.getElementById('setup-overlay').style.display = 'none';
     
-    // UUTTA: Rekisteröidään pelaaja sisään tietokantaan
     db.child('players/' + myPlayerId).set(true);
-    // UUTTA: Jos pelaaja sulkee selaimen, Firebase poistaa hänet automaattisesti
     db.child('players/' + myPlayerId).onDisconnect().remove();
 
     db.on('value', (snapshot) => {
         const data = snapshot.val();
         if (data) {
-            // UUTTA: Tarkistetaan, että molemmat pelaajat (1 ja 2) ovat online-tilassa
             const p1Ready = data.players && data.players[1];
             const p2Ready = data.players && data.players[2];
             gameActive = !!(p1Ready && p2Ready);
@@ -119,15 +116,29 @@ function selectPlayer(id) {
                 initNewGame();
             } else if (data.board) {
                 const boardChanged = JSON.stringify(board) !== JSON.stringify(data.board);
-                board = data.board;
                 const oldTurn = currentPlayer;
-                currentPlayer = data.currentPlayer || 1;
+                const newTurn = data.currentPlayer || 1;
                 
-                render();
-                updateStatusText();
-                
-                if (boardChanged && currentPlayer === myPlayerId && gameActive) {
+                // SYNKKAKORJAUS: Jos on meidän vuoro ja lauta muuttui (eli vastustaja teki siirron)
+                if (boardChanged && newTurn === myPlayerId && gameActive) {
+                    
+                    // 1. Ammutaan ensin vastustajan laser VANHALLA laudalla
                     fireLaser(oldTurn, false); 
+                    
+                    // 2. Odotetaan että laser-animaatio menee ohi (1 sekunti)
+                    setTimeout(() => {
+                        board = data.board;
+                        currentPlayer = newTurn;
+                        render();
+                        updateStatusText();
+                    }, 1000);
+
+                } else {
+                    // Jos normaali päivitys (ei vastustajan ammunta)
+                    board = data.board;
+                    currentPlayer = newTurn;
+                    render();
+                    updateStatusText();
                 }
             } else {
                 updateStatusText();
@@ -140,15 +151,11 @@ function selectPlayer(id) {
 
 function updateStatusText() {
     const status = document.getElementById('status-text');
-    
-    // Jos toinen pelaaja puuttuu
     if (!gameActive) {
         status.innerText = "WAITING FOR OPPONENT...";
-        status.style.color = "#ffaa00"; // Oranssi väri varoituksena
+        status.style.color = "#ffaa00"; 
         return;
     }
-
-    // Normaali vuoron näyttö
     if (currentPlayer === myPlayerId) {
         status.innerText = "YOUR TURN";
         status.style.color = (myPlayerId === 1) ? "#00aaaa" : "#cc4444";
@@ -183,7 +190,6 @@ function initNewGame() {
 }
 
 function syncWithFirebase() {
-    // UUTTA: Käytetään db.update jotta muiden pelaajien online-tieto (players-objekti) ei pyyhkiydy
     db.update({ board: board, currentPlayer: currentPlayer });
 }
 
@@ -196,7 +202,6 @@ function resetEntireGame() {
 
 // --- CORE GAME ACTIONS ---
 function handleClick(r, c) {
-    // UUTTA: Estetään siirrot, jos peli ei ole käynnissä (toinen puuttuu)
     if (!gameActive || currentPlayer !== myPlayerId || hasDoneAction) return;
     
     const piece = board[r][c];
@@ -204,7 +209,6 @@ function handleClick(r, c) {
         if (Math.abs(selectedPos.r - r) <= 1 && Math.abs(selectedPos.c - c) <= 1 && !piece) {
             const p = board[selectedPos.r][selectedPos.c];
             if (p.type === 'cannon') return;
-            // Area restrictions
             if ((c===0 || (r===0 && c===8) || (r===7 && c===8)) && p.player !== 2) return;
             if ((c===9 || (r===0 && c===1) || (r===7 && c===1)) && p.player !== 1) return;
             
@@ -249,6 +253,7 @@ document.getElementById('btn-undo').onclick = () => {
 document.getElementById('btn-confirm').onclick = () => {
     document.getElementById('btn-confirm').disabled = true;
     document.getElementById('btn-undo').disabled = true;
+    // Olen itse tehnyt siirron, joten laukaistaan minun laserini
     fireLaser(myPlayerId, true);
 };
 
@@ -294,8 +299,11 @@ function fireLaser(shooterId, isMyLocalTurn) {
             playSound('hit');
             document.getElementById(`piece-${hit.r}-${hit.c}`)?.classList.add('destroying');
             setTimeout(() => { 
-                board[hit.r][hit.c] = null; 
-                if (isMyLocalTurn) endTurn(); else render();
+                // Vain siirron tekijä (isMyLocalTurn) päivittää uuden tiedon Firebaseen
+                if (isMyLocalTurn) {
+                    board[hit.r][hit.c] = null; 
+                    endTurn(); 
+                }
                 ctx.clearRect(0,0,600,480);
             }, 600);
         } else {
