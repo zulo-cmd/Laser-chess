@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Laser Chess Online - Fixed</title>
+    <title>Laser Chess Online - Sync Fixed</title>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
     <style>
@@ -18,7 +18,7 @@
         .hatched-red { background: repeating-linear-gradient(45deg, #222, #222 5px, #551111 5px, #551111 10px); }
         .hatched-cyan { background: repeating-linear-gradient(45deg, #222, #222 5px, #114444 5px, #114444 10px); }
         .selected { background-color: rgba(255, 255, 0, 0.2) !important; box-shadow: inset 0 0 15px yellow; }
-        .piece { transition: transform 0.3s; width: 100%; height: 100%; }
+        .piece { transition: all 0.4s ease-in-out; width: 100%; height: 100%; }
         
         #laser-canvas { position: absolute; top: 0; left: 0; pointer-events: none; z-index: 10; }
         #controls { margin-top: 20px; display: flex; gap: 15px; background: #333; padding: 15px; border-radius: 12px; border: 1px solid #555; }
@@ -79,7 +79,6 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database().ref('game_state');
 
-// --- AUDIO ---
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playSound(type) {
     if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -91,7 +90,6 @@ function playSound(type) {
     else if (type === 'hit') { osc.type = 'square'; osc.frequency.setValueAtTime(150, audioCtx.currentTime); gain.gain.setValueAtTime(0.1, audioCtx.currentTime); osc.start(); osc.stop(audioCtx.currentTime + 0.4); }
 }
 
-// --- GAME STATE ---
 const ROWS = 8, COLS = 10;
 let myPlayerId = null; 
 let currentPlayer = 1;
@@ -100,8 +98,8 @@ let originalBoard = null;
 let selectedPos = null;
 let hasDoneAction = false;
 let gameActive = false;
+let lastActionId = null; // Seurataan ettei suoriteta samaa ammuntaa kahdesti
 
-// Alustava tarkistus ketä on paikalla
 db.child('players').on('value', (snap) => {
     const p = snap.val() || {};
     document.getElementById('lobby-status').innerText = 
@@ -111,22 +109,17 @@ db.child('players').on('value', (snap) => {
 function selectPlayer(id) {
     myPlayerId = id;
     document.getElementById('setup-overlay').style.display = 'none';
-    
-    // Kirjaudu sisään
     db.child('players/' + myPlayerId).set(true);
     db.child('players/' + myPlayerId).onDisconnect().remove();
 
-    // Kuuntele kaikkia muutoksia
     db.on('value', (snapshot) => {
         const data = snapshot.val();
         if (!data) return;
 
-        // Päivitä online-pisteet
         const p1Online = data.players && data.players[1];
         const p2Online = data.players && data.players[2];
         document.getElementById('dot-1').className = 'online-dot' + (p1Online ? ' online' : '');
         document.getElementById('dot-2').className = 'online-dot' + (p2Online ? ' online' : '');
-
         gameActive = !!(p1Online && p2Online);
 
         if (!data.board) {
@@ -134,22 +127,24 @@ function selectPlayer(id) {
             return;
         }
 
-        const boardChanged = JSON.stringify(board) !== JSON.stringify(data.board);
-        const oldTurn = currentPlayer;
-        const newTurn = data.currentPlayer || 1;
-
-        if (boardChanged && newTurn === myPlayerId && gameActive) {
-            // Vastustaja teki siirron, ammutaan laser vanhalla tiedolla
-            fireLaser(oldTurn, false);
-            setTimeout(() => {
-                board = data.board;
-                currentPlayer = newTurn;
-                render();
-                updateStatusText();
-            }, 1000);
-        } else {
+        // TARKISTETAAN ONKO TAPAHTUNUT AMMUNTA (Action Trigger)
+        if (data.lastAction && data.lastAction.id !== lastActionId) {
+            lastActionId = data.lastAction.id;
+            
+            // 1. Päivitetään lauta välitilaan (nappula on siirtynyt, mutta ei vielä räjähtänyt)
             board = data.board;
-            currentPlayer = newTurn;
+            render();
+            
+            // 2. Jos ampuja oli vastustaja, suoritetaan animaatio
+            if (data.lastAction.shooter !== myPlayerId) {
+                setTimeout(() => {
+                    fireLaser(data.lastAction.shooter, false);
+                }, 300); // Pieni viive jotta silmä ehtii nähdä siirron
+            }
+        } else {
+            // Normaali päivitys (ei ammuntaa menossa)
+            board = data.board;
+            currentPlayer = data.currentPlayer || 1;
             render();
             updateStatusText();
         }
@@ -194,11 +189,7 @@ function initNewGame() {
     ];
     setup.forEach(s => newBoard[s.r][s.c] = { player: s.p, type: s.t, rot: s.rot });
     board = newBoard;
-    syncWithFirebase();
-}
-
-function syncWithFirebase() {
-    db.update({ board: board, currentPlayer: currentPlayer });
+    db.set({ board: board, currentPlayer: 1 });
 }
 
 function resetEntireGame() {
@@ -256,10 +247,21 @@ document.getElementById('btn-undo').onclick = () => {
     render();
 };
 
+// CONFIRM: Lähetetään välitila Firebaseen ennen kuin ammutaan
 document.getElementById('btn-confirm').onclick = () => {
     document.getElementById('btn-confirm').disabled = true;
     document.getElementById('btn-undo').disabled = true;
-    fireLaser(myPlayerId, true);
+    
+    const actionId = Date.now().toString();
+    lastActionId = actionId;
+    
+    // Kerrotaan Firebaselle: Tässä on uusi lauta ja aion ampua NYT
+    db.update({ 
+        board: board, 
+        lastAction: { id: actionId, shooter: myPlayerId } 
+    }).then(() => {
+        fireLaser(myPlayerId, true);
+    });
 };
 
 function fireLaser(shooterId, isMyLocalTurn) {
@@ -292,7 +294,7 @@ function fireLaser(shooterId, isMyLocalTurn) {
             if (res==='destroy') { hit={r:y,c:x}; break; }
             if (res==='win') { 
                 ctx.stroke();
-                setTimeout(() => { alert("GAME OVER! King Destroyed."); resetEntireGame(); }, 500);
+                setTimeout(() => { alert("GAME OVER!"); resetEntireGame(); }, 500);
                 return; 
             }
             dir = res;
@@ -339,7 +341,7 @@ function resolve(p, d) {
 function endTurn() {
     currentPlayer = (myPlayerId === 1) ? 2 : 1;
     hasDoneAction = false;
-    syncWithFirebase();
+    db.update({ board: board, currentPlayer: currentPlayer, lastAction: null });
 }
 
 function getSVG(p) {
