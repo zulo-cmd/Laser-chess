@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Laser Chess Online</title>
+    <title>Laser Chess Online - Fixed</title>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
     <style>
@@ -26,7 +26,10 @@
         #btn-confirm { background-color: #2e7d32; box-shadow: 0 4px #1b5e20; }
         #btn-undo { background-color: #c62828; box-shadow: 0 4px #8e0000; }
         button:disabled { opacity: 0.2; cursor: not-allowed; }
-        .status-bar { width: 600px; display: flex; justify-content: space-between; margin-bottom: 10px; font-size: 22px; font-weight: bold; letter-spacing: 2px; }
+        
+        .status-bar { width: 600px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; font-size: 18px; font-weight: bold; }
+        .online-dot { width: 12px; height: 12px; border-radius: 50%; display: inline-block; background: #444; margin-right: 5px; }
+        .online { background: #00ff00 !important; box-shadow: 0 0 10px #00ff00; }
         
         @keyframes explode { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(0); opacity: 0; } }
         .destroying { animation: explode 0.6s forwards; }
@@ -36,18 +39,18 @@
 
 <div id="setup-overlay">
     <h1 style="font-size: 40px; margin-bottom: 30px;">LASER CHESS ONLINE</h1>
-    <p style="color: #aaa; margin-bottom: 20px;">Pick your side to start the battle</p>
+    <div id="lobby-status" style="margin-bottom: 20px; color: #ffaa00;">Initializing...</div>
     <div>
-        <button class="setup-btn" style="background:#00aaaa;" onclick="selectPlayer(1)">Player 1 (Cyan)</button>
-        <button class="setup-btn" style="background:#cc4444;" onclick="selectPlayer(2)">Player 2 (Red)</button>
+        <button class="setup-btn" style="background:#00aaaa;" onclick="selectPlayer(1)">Join as Player 1</button>
+        <button class="setup-btn" style="background:#cc4444;" onclick="selectPlayer(2)">Join as Player 2</button>
     </div>
-    <button style="margin-top: 40px; background: none; border: 1px solid #555; color: #777;" onclick="resetEntireGame()">Reset Database</button>
+    <button style="margin-top: 40px; background: none; border: 1px solid #555; color: #777;" onclick="resetEntireGame()">Reset Entire Game</button>
 </div>
 
 <div class="status-bar">
-    <span style="color: #cc4444;">RED</span>
-    <span id="status-text" style="color: #ccc;">CONNECTING...</span>
-    <span style="color: #00aaaa;">CYAN</span>
+    <div><span id="dot-2" class="online-dot"></span><span style="color: #cc4444;">RED</span></div>
+    <span id="status-text" style="color: #ccc; letter-spacing: 2px;">WAITING...</span>
+    <div><span style="color: #00aaaa;">CYAN</span><span id="dot-1" class="online-dot"></span></div>
 </div>
 
 <div id="game-container">
@@ -63,7 +66,6 @@
 </div>
 
 <script>
-// --- FIREBASE SETUP ---
 const firebaseConfig = {
     apiKey: "AIzaSyDhTAxVQBzT1NW99opq7c6eh4OHhIRxVv0",
     authDomain: "laserchess-online.firebaseapp.com",
@@ -80,6 +82,7 @@ const db = firebase.database().ref('game_state');
 // --- AUDIO ---
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playSound(type) {
+    if (audioCtx.state === 'suspended') audioCtx.resume();
     const osc = audioCtx.createOscillator();
     const gain = audioCtx.createGain();
     osc.connect(gain); gain.connect(audioCtx.destination);
@@ -96,55 +99,59 @@ let board = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
 let originalBoard = null;
 let selectedPos = null;
 let hasDoneAction = false;
-let gameActive = false; 
+let gameActive = false;
+
+// Alustava tarkistus ketä on paikalla
+db.child('players').on('value', (snap) => {
+    const p = snap.val() || {};
+    document.getElementById('lobby-status').innerText = 
+        `Players Online: ${p[1] ? 'P1 ' : ''}${p[2] ? 'P2' : ''}${(!p[1] && !p[2]) ? 'None' : ''}`;
+});
 
 function selectPlayer(id) {
     myPlayerId = id;
     document.getElementById('setup-overlay').style.display = 'none';
     
+    // Kirjaudu sisään
     db.child('players/' + myPlayerId).set(true);
     db.child('players/' + myPlayerId).onDisconnect().remove();
 
+    // Kuuntele kaikkia muutoksia
     db.on('value', (snapshot) => {
         const data = snapshot.val();
-        if (data) {
-            const p1Ready = data.players && data.players[1];
-            const p2Ready = data.players && data.players[2];
-            gameActive = !!(p1Ready && p2Ready);
+        if (!data) return;
 
-            if (!data.board && myPlayerId === 1) {
-                initNewGame();
-            } else if (data.board) {
-                const boardChanged = JSON.stringify(board) !== JSON.stringify(data.board);
-                const oldTurn = currentPlayer;
-                const newTurn = data.currentPlayer || 1;
-                
-                // SYNKKAKORJAUS: Jos on meidän vuoro ja lauta muuttui (eli vastustaja teki siirron)
-                if (boardChanged && newTurn === myPlayerId && gameActive) {
-                    
-                    // 1. Ammutaan ensin vastustajan laser VANHALLA laudalla
-                    fireLaser(oldTurn, false); 
-                    
-                    // 2. Odotetaan että laser-animaatio menee ohi (1 sekunti)
-                    setTimeout(() => {
-                        board = data.board;
-                        currentPlayer = newTurn;
-                        render();
-                        updateStatusText();
-                    }, 1000);
+        // Päivitä online-pisteet
+        const p1Online = data.players && data.players[1];
+        const p2Online = data.players && data.players[2];
+        document.getElementById('dot-1').className = 'online-dot' + (p1Online ? ' online' : '');
+        document.getElementById('dot-2').className = 'online-dot' + (p2Online ? ' online' : '');
 
-                } else {
-                    // Jos normaali päivitys (ei vastustajan ammunta)
-                    board = data.board;
-                    currentPlayer = newTurn;
-                    render();
-                    updateStatusText();
-                }
-            } else {
+        gameActive = !!(p1Online && p2Online);
+
+        if (!data.board) {
+            if (myPlayerId === 1) initNewGame();
+            return;
+        }
+
+        const boardChanged = JSON.stringify(board) !== JSON.stringify(data.board);
+        const oldTurn = currentPlayer;
+        const newTurn = data.currentPlayer || 1;
+
+        if (boardChanged && newTurn === myPlayerId && gameActive) {
+            // Vastustaja teki siirron, ammutaan laser vanhalla tiedolla
+            fireLaser(oldTurn, false);
+            setTimeout(() => {
+                board = data.board;
+                currentPlayer = newTurn;
+                render();
                 updateStatusText();
-            }
-        } else if (myPlayerId === 1) {
-            initNewGame();
+            }, 1000);
+        } else {
+            board = data.board;
+            currentPlayer = newTurn;
+            render();
+            updateStatusText();
         }
     });
 }
@@ -153,7 +160,7 @@ function updateStatusText() {
     const status = document.getElementById('status-text');
     if (!gameActive) {
         status.innerText = "WAITING FOR OPPONENT...";
-        status.style.color = "#ffaa00"; 
+        status.style.color = "#ffaa00";
         return;
     }
     if (currentPlayer === myPlayerId) {
@@ -168,8 +175,8 @@ function updateStatusText() {
 function pos(x, y) { return { r: 8 - y, c: x - 1 }; }
 
 function initNewGame() {
-    board = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
-    const initialSetup = [
+    let newBoard = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
+    const setup = [
         {...pos(1,8), p:2, t:'cannon', rot:2}, {...pos(5,8), p:2, t:'shield', rot:2},
         {...pos(6,8), p:2, t:'king',   rot:2}, {...pos(7,8), p:2, t:'shield', rot:2},
         {...pos(8,8), p:2, t:'single', rot:3}, {...pos(3,7), p:2, t:'single', rot:0},
@@ -185,7 +192,8 @@ function initNewGame() {
         {...pos(10,5), p:1, t:'single', rot:1}, {...pos(3,5), p:1, t:'single', rot:0},
         {...pos(4,6), p:1, t:'single', rot:1}
     ];
-    initialSetup.forEach(s => board[s.r][s.c] = { player: s.p, type: s.t, rot: s.rot });
+    setup.forEach(s => newBoard[s.r][s.c] = { player: s.p, type: s.t, rot: s.rot });
+    board = newBoard;
     syncWithFirebase();
 }
 
@@ -194,16 +202,14 @@ function syncWithFirebase() {
 }
 
 function resetEntireGame() {
-    if(confirm("Reset the entire game database?")) {
-        db.remove();
-        location.reload();
+    if(confirm("DANGER: This wipes the game for everyone. Continue?")) {
+        db.remove().then(() => location.reload());
     }
 }
 
-// --- CORE GAME ACTIONS ---
+// --- LOGIC ---
 function handleClick(r, c) {
     if (!gameActive || currentPlayer !== myPlayerId || hasDoneAction) return;
-    
     const piece = board[r][c];
     if (selectedPos) {
         if (Math.abs(selectedPos.r - r) <= 1 && Math.abs(selectedPos.c - c) <= 1 && !piece) {
@@ -253,7 +259,6 @@ document.getElementById('btn-undo').onclick = () => {
 document.getElementById('btn-confirm').onclick = () => {
     document.getElementById('btn-confirm').disabled = true;
     document.getElementById('btn-undo').disabled = true;
-    // Olen itse tehnyt siirron, joten laukaistaan minun laserini
     fireLaser(myPlayerId, true);
 };
 
@@ -265,7 +270,8 @@ function fireLaser(shooterId, isMyLocalTurn) {
             if(board[r][c]?.type==='cannon' && board[r][c].player===shooterId) tykki={r,c,rot:board[r][c].rot};
         }
     }
-    
+    if (!tykki) return;
+
     let x=tykki.c, y=tykki.r, dir=tykki.rot;
     const canvas = document.getElementById('laser-canvas');
     const ctx = canvas.getContext('2d');
@@ -286,7 +292,7 @@ function fireLaser(shooterId, isMyLocalTurn) {
             if (res==='destroy') { hit={r:y,c:x}; break; }
             if (res==='win') { 
                 ctx.stroke();
-                setTimeout(() => { alert("GAME OVER! King Destroyed."); location.reload(); }, 500);
+                setTimeout(() => { alert("GAME OVER! King Destroyed."); resetEntireGame(); }, 500);
                 return; 
             }
             dir = res;
@@ -299,7 +305,6 @@ function fireLaser(shooterId, isMyLocalTurn) {
             playSound('hit');
             document.getElementById(`piece-${hit.r}-${hit.c}`)?.classList.add('destroying');
             setTimeout(() => { 
-                // Vain siirron tekijä (isMyLocalTurn) päivittää uuden tiedon Firebaseen
                 if (isMyLocalTurn) {
                     board[hit.r][hit.c] = null; 
                     endTurn(); 
