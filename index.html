@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Laser Chess Online - Sync Fixed</title>
+    <title>Laser Chess Online - Board Fix</title>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
     <style>
@@ -98,13 +98,27 @@ let originalBoard = null;
 let selectedPos = null;
 let hasDoneAction = false;
 let gameActive = false;
-let lastActionId = null; // Seurataan ettei suoriteta samaa ammuntaa kahdesti
+let lastActionId = null; 
 
 db.child('players').on('value', (snap) => {
     const p = snap.val() || {};
     document.getElementById('lobby-status').innerText = 
         `Players Online: ${p[1] ? 'P1 ' : ''}${p[2] ? 'P2' : ''}${(!p[1] && !p[2]) ? 'None' : ''}`;
 });
+
+// TURVALLINEN LAUDAN PARSIJA: Estää Firebasen tyhjien rivien poiston aiheuttamat kaatumiset
+function parseBoard(firebaseData) {
+    let safeBoard = Array(ROWS).fill(null).map(() => Array(COLS).fill(null));
+    if (!firebaseData) return safeBoard;
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            if (firebaseData[r] && firebaseData[r][c]) {
+                safeBoard[r][c] = firebaseData[r][c];
+            }
+        }
+    }
+    return safeBoard;
+}
 
 function selectPlayer(id) {
     myPlayerId = id;
@@ -127,23 +141,19 @@ function selectPlayer(id) {
             return;
         }
 
-        // TARKISTETAAN ONKO TAPAHTUNUT AMMUNTA (Action Trigger)
         if (data.lastAction && data.lastAction.id !== lastActionId) {
             lastActionId = data.lastAction.id;
             
-            // 1. Päivitetään lauta välitilaan (nappula on siirtynyt, mutta ei vielä räjähtänyt)
-            board = data.board;
+            board = parseBoard(data.board); // Käytetään turvallista parsijaa
             render();
             
-            // 2. Jos ampuja oli vastustaja, suoritetaan animaatio
             if (data.lastAction.shooter !== myPlayerId) {
                 setTimeout(() => {
                     fireLaser(data.lastAction.shooter, false);
-                }, 300); // Pieni viive jotta silmä ehtii nähdä siirron
+                }, 300); 
             }
         } else {
-            // Normaali päivitys (ei ammuntaa menossa)
-            board = data.board;
+            board = parseBoard(data.board); // Käytetään turvallista parsijaa
             currentPlayer = data.currentPlayer || 1;
             render();
             updateStatusText();
@@ -189,7 +199,9 @@ function initNewGame() {
     ];
     setup.forEach(s => newBoard[s.r][s.c] = { player: s.p, type: s.t, rot: s.rot });
     board = newBoard;
-    db.set({ board: board, currentPlayer: 1 });
+    
+    // KORJATTU: update() ei tuhoa players-tietoja, kuten set() teki
+    db.update({ board: board, currentPlayer: 1 }); 
 }
 
 function resetEntireGame() {
@@ -247,7 +259,6 @@ document.getElementById('btn-undo').onclick = () => {
     render();
 };
 
-// CONFIRM: Lähetetään välitila Firebaseen ennen kuin ammutaan
 document.getElementById('btn-confirm').onclick = () => {
     document.getElementById('btn-confirm').disabled = true;
     document.getElementById('btn-undo').disabled = true;
@@ -255,7 +266,6 @@ document.getElementById('btn-confirm').onclick = () => {
     const actionId = Date.now().toString();
     lastActionId = actionId;
     
-    // Kerrotaan Firebaselle: Tässä on uusi lauta ja aion ampua NYT
     db.update({ 
         board: board, 
         lastAction: { id: actionId, shooter: myPlayerId } 
@@ -289,7 +299,7 @@ function fireLaser(shooterId, isMyLocalTurn) {
         if (x<0 || x>=10 || y<0 || y>=8) break;
         let p = board[y][x];
         if (p) {
-            let res = resolve(p, dir);
+            let res = resolve(p, d=dir);
             if (res==='stop') break;
             if (res==='destroy') { hit={r:y,c:x}; break; }
             if (res==='win') { 
